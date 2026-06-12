@@ -1,68 +1,66 @@
 ---
-name: code-review
+name: dbt-review
 description: Full pre-merge review for dbt/Snowflake SQL. Commits outstanding files, lints and fixes SQL, validates CONTRIBUTING.md conventions, ensures yml coverage, runs dbt build/compile/parse, checks grain, identifies macro reuse, and compares dev vs prod metrics. Use before merging any branch.
 ---
 
-You are a Lead Analytics Engineer doing a thorough, end-to-end code review. Follow each step in order. Do not skip steps. Fix issues as you go — do not just report them. Report findings section by section.
+You are a Lead Analytics Engineer doing a thorough, end-to-end code review.
+
+**EXECUTION RULES — read before starting:**
+- Execute every step in order. Never skip a step, never reorder them.
+- Each step ends with a mandatory CHECKPOINT. You must output the checkpoint line exactly before moving to the next step.
+- If a step's GATE condition is not met, output `BLOCKED: <reason>` and stop. Do not proceed until the user resolves the blocker.
+- Fix issues as you find them — do not just report.
 
 ---
 
-## Step 1 — Understand what changed and commit any outstanding files
+## Step 1 — Discover state and commit outstanding files
 
-**1a. Discover the branch state**
-
-Run:
+**1a.** Run these commands and show the full output:
 ```
 git status
 git log main..HEAD --oneline
 git diff main..HEAD --name-only
 ```
 
-**1b. Commit any uncommitted changes**
+**1b.** If `git status` shows any untracked or modified files:
+- Read `CONTRIBUTING.md` for the commit message convention
+- Stage each file explicitly: `git add <file>` — never `git add -A` or `git add .`
+- Commit with a descriptive message
+- Re-run `git status` to confirm the tree is clean
 
-If `git status` shows any unstaged or staged-but-uncommitted files:
-- Stage and commit them with a descriptive message following the branch naming convention from `CONTRIBUTING.md`
-- Use `git add <specific files>` — never `git add -A` or `git add .`
-- After committing, re-run `git diff main..HEAD --name-only` to confirm the full changeset
+**1c.** List every file changed vs `main`. For each state: type (model/seed/macro/yml/other), layer if a model (base/facts/derived/output/adhoc), one sentence on what it does.
 
-**1c. Inventory the changeset**
+> **GATE:** `git status` must show a clean working tree before proceeding.
+> If untracked or modified files remain after 1b, output `BLOCKED: working tree is not clean — commit all changes before continuing.` and stop.
 
-List every changed file. For each, state:
-- File type: model / seed / macro / yml / other
-- Layer if a model: base / facts / derived / output / adhoc
-- One sentence describing what it does
-
-Do not proceed until the working tree is clean.
+**✓ CHECKPOINT 1:** Output exactly → `STEP 1 COMPLETE: <N> files changed vs main, working tree clean.`
 
 ---
 
 ## Step 2 — Lint and fix SQL
 
-For every `.sql` file in the changeset, run:
+**2a.** For every `.sql` file in the changeset, run:
 ```
 sqlfluff lint <file_path> --dialect snowflake
 ```
-then
-```
-sqlfluff fix <file_path> --dialect snowflake
-```
+Record the violation count per file.
 
-If violations are found:
-- Run `sqlfluff fix <file_path> --dialect snowflake` to apply safe auto-corrections
-- Re-run `sqlfluff lint <file_path> --dialect snowflake` to confirm no remaining violations
-- Commit the lint fixes as a separate commit: `style: sqlfluff fixes on <model_name>`
+**2b.** If violations found: run `sqlfluff fix <file_path> --dialect snowflake`, then re-lint to confirm zero remaining violations. For any violation that cannot be auto-fixed, fix it manually and note the rule ID and line.
 
-Report the before/after violation count per file. If a violation cannot be auto-fixed, flag it explicitly with the rule ID and line number and fix it manually.
+**2c.** Commit all lint fixes as a separate commit: `style: sqlfluff fixes on <model_name>`
 
-**Do not proceed until all `.sql` files lint clean.**
+> **GATE:** Every `.sql` file must lint clean (zero violations) and all fixes must be committed before proceeding.
+> If any file still has violations, output `BLOCKED: <file> still has <N> sqlfluff violations — fix before continuing.` and stop.
 
-Validate all changes are committed again before going to the next step.
+**✓ CHECKPOINT 2:** Output exactly → `STEP 2 COMPLETE: all SQL files lint clean, fixes committed.`
 
 ---
 
 ## Step 3 — Validate against CONTRIBUTING.md conventions
 
-Read `CONTRIBUTING.md` in full. Then for every changed file, verify:
+**3a.** Read `CONTRIBUTING.md` in full.
+
+**3b.** For every changed file verify:
 
 **SQL style**
 - `GROUP BY ALL` instead of positional `GROUP BY 1, 2, 3`
@@ -80,71 +78,67 @@ Read `CONTRIBUTING.md` in full. Then for every changed file, verify:
 **Model naming**
 - Prefix matches layer: `base_<source>__<name>`, `fact_<entity>`, `derived_*`, `output_*`
 
-Flag every violation with the file name and the specific CONTRIBUTING.md rule it breaks. Fix violations where possible; flag ones that require manual decisions.
+**3c.** For each violation: state the file, line, and specific CONTRIBUTING.md rule broken. Fix it directly in the file. If a fix requires a human decision (e.g. renaming a model with downstream dependents), flag it as `MANUAL DECISION NEEDED` and continue.
+
+**3d.** Commit any fixes: `fix: CONTRIBUTING.md convention violations in <model_name>`
+
+> **GATE:** All auto-fixable violations must be resolved and committed.
+
+**✓ CHECKPOINT 3:** Output exactly → `STEP 3 COMPLETE: <N> violations found, <N> fixed, <N> flagged for manual decision.`
 
 ---
 
 ## Step 4 — Review null handling
 
-For each modified model, check every join, filter, and aggregation for silent null behavior:
+For each modified model, read the full SQL and check every join, filter, and aggregation:
 
 **Join keys**
 - If a join key can be NULL on either side, rows are silently dropped. Flag any join on a column not guaranteed non-null.
-- For LEFT JOINs: confirm a null right-hand key is intentional (e.g. optional enrichment), not a data gap.
+- For LEFT JOINs: confirm a null right-hand key is intentional (optional enrichment), not a data gap.
 
 **Filter columns**
-- `WHERE col = 'value'` silently excludes NULLs. Is that intentional, or should it be `WHERE col = 'value' OR col IS NULL`?
+- `WHERE col = 'value'` silently excludes NULLs. Confirm this is intentional.
 
 **Aggregation inputs**
-- `SUM()` and `AVG()` ignore NULLs silently. Should the column be `COALESCE`d to 0 before aggregating?
-- Flag any metric column fed into a `SUM()` that could be NULL — confirm the behavior is intentional.
+- `SUM()` and `AVG()` ignore NULLs silently. Flag any metric column fed into `SUM()` that could be NULL.
 
 **Surrogate keys**
-- Are surrogate keys built with `{{ dbt_utils.generate_surrogate_key() }}`?
-- Flag any use of raw `md5()` or `md5(a || b)` — `NULL || 'foo'` coerces to `'foo'` before hashing, silently colliding rows that should be distinct.
+- Flag any use of raw `md5()` or `md5(a || b)` — `NULL || 'foo'` coerces to `'foo'` before hashing, silently colliding rows. Replace with `{{ dbt_utils.generate_surrogate_key() }}`.
 
-Fix null-handling issues directly in the SQL. If the behavior is intentional (e.g. a LEFT JOIN that is meant to drop non-matching rows), add a comment in the CTE explaining why.
+Fix null-handling issues directly in the SQL. If intentional behavior (e.g. a LEFT JOIN that should drop non-matches), add an inline comment explaining why.
+
+**✓ CHECKPOINT 4:** Output exactly → `STEP 4 COMPLETE: <N> null-handling issues found and fixed.`
 
 ---
 
 ## Step 5 — Validate and add yml coverage
 
-For each modified or newly created `.sql` model file:
+For each modified or newly created `.sql` model:
 
-**5a. Check for a yml entry**
+**5a.** Find its yml entry in the same directory. If missing, create the file.
 
-Locate the model's entry in a `.yml` file in the same directory. If it does not exist, create it.
+A complete entry requires:
+- `name`: exact model file name
+- `description`: what it represents, grain, and refresh cadence
+- `columns`: at minimum the PK column with a description
 
-A complete yml entry must include:
-- `name`: matches the model file name exactly
-- `description`: what the model represents, its grain, and refresh cadence
-- `columns`: at minimum the primary key column documented with a description
-
-**5b. Check and add PK tests**
-
-The primary key column must have both:
+**5b.** The PK column must have both tests. Add if missing:
 ```yaml
 tests:
   - unique
   - not_null
 ```
 
-If either test is missing, add it.
+**5c.** Add `not_null` tests on: foreign keys used in joins, date columns driving incremental logic, metric columns (`sales_usd`, `quantity`, `revenue`, `spend`, `sessions`, `users`, `cogs`), status/type columns used in `WHERE` or `CASE`.
 
-**5c. Add not_null tests on important columns**
+**5d.** Seeds only: confirm `quote_columns: false`, `column_types:` declared for all columns, `unique` + `not_null` on natural key.
 
-For each of the following column types, add a `not_null` test if one does not exist:
-- Foreign keys used in joins
-- Date/timestamp columns that drive incremental logic or fiscal calendar joins
-- Metric columns (`sales_usd`, `quantity`, `revenue`, `spend`, `sessions`, `users`, `cogs`)
-- Status/type columns used in `WHERE` or `CASE` logic
+**5e.** Commit: `docs: add yml coverage for <model_name>`
 
-**5d. Check seed yml coverage** (if seeds changed)
-- `quote_columns: false` is set
-- `column_types:` are declared for all columns
-- `unique` + `not_null` tests exist on the natural key
+> **GATE:** Every modified model must have a yml entry with a PK test before proceeding.
+> If missing, output `BLOCKED: <model_name> has no yml entry — create it before continuing.` and stop.
 
-After making additions, commit: `docs: add yml coverage for <model_name>`
+**✓ CHECKPOINT 5:** Output exactly → `STEP 5 COMPLETE: yml coverage confirmed for all modified models, committed.`
 
 ---
 
@@ -153,208 +147,159 @@ After making additions, commit: `docs: add yml coverage for <model_name>`
 For each modified model and its immediate upstream and downstream dependencies:
 
 - State the grain explicitly: "one row per (column_a, column_b)"
-- Verify every join in the model preserves the grain — no fan-out (1:many without aggregation) and no unintended collapse (many:1 losing rows)
-- Flag any CTE that changes the grain without a comment explaining why
-- For incremental models: confirm the `is_incremental()` `WHERE` clause correctly bounds the window and that `unique_key` is set
+- Verify every join preserves the grain — no fan-out (1:many without aggregation), no unintended collapse (many:1 losing rows)
+- Flag any CTE that changes the grain without an explaining comment
+- Incremental models: confirm `is_incremental()` `WHERE` clause bounds the window correctly and `unique_key` is set
 
-For joins, check both directions:
-- Could the right-hand table return multiple rows per join key? (fan-out risk)
-- Could a LEFT JOIN silently drop rows if the right-hand table has nulls on the key? (null-drop risk)
+For each join, check both directions:
+- Could the right-hand table return multiple rows per join key? → fan-out risk
+- Could a LEFT JOIN drop rows due to NULL on the join key? → null-drop risk
 
-If a grain issue is found, propose and apply the fix — usually a pre-aggregation CTE before the join.
+If a grain issue is found, apply the fix (usually a pre-aggregation CTE before the join) and note what was changed.
+
+**✓ CHECKPOINT 6:** Output exactly → `STEP 6 COMPLETE: grain validated for <N> models, <N> issues found and fixed.`
 
 ---
 
-## Step 7 — Identify macro reuse opportunities
+## Step 7 — Identify and apply macro reuse
 
-Run `ls macros/` to list available macros, then read any that are relevant to the modified models. For each modified model, check:
+Run `ls macros/` to list available macros. Read any that are relevant. For each modified model check:
 
-- **`{{ shopify_is_valid_order_source() }}`** — is the model manually filtering `source_name not in ('Grin', 'Draft')` or similar? Replace with the macro.
-- **`{{ dbt_utils.generate_surrogate_key() }}`** — is any surrogate key built with raw `md5()` or `md5(a || b)`? Replace with the macro.
-- **`{{ dbt_utils.date_spine() }}`** — is a date spine being built manually with a recursive CTE or a cross join on a numbers table? Replace with the macro.
-- **`{{ dbt_utils.expression_is_true() }}`** — are business-rule assertions written as raw SQL tests? Replace with the macro.
-- Any other macro in `macros/` that duplicates logic in the modified model
+- **`{{ shopify_is_valid_order_source() }}`** — any manual `source_name not in (...)` filter? Replace with the macro.
+- **`{{ dbt_utils.generate_surrogate_key() }}`** — any raw `md5()` surrogate key? Replace with the macro.
+- **`{{ dbt_utils.date_spine() }}`** — any manual date spine? Replace with the macro.
+- **`{{ dbt_utils.expression_is_true() }}`** — any raw SQL business-rule assertion? Replace with the macro.
+- Any other macro in `macros/` that duplicates logic in the changed model.
 
-For each opportunity found:
-- State the file and line number
-- Show the before and after
-- Apply the fix if it is a straightforward substitution
-- Flag for human decision if the substitution changes behavior
+For each found: show file + line, before/after. Apply if straightforward. Flag `MANUAL DECISION NEEDED` if the substitution changes behavior.
+
+**✓ CHECKPOINT 7:** Output exactly → `STEP 7 COMPLETE: <N> macro reuse opportunities found, <N> applied.`
 
 ---
 
 ## Step 8 — Run dbt build, compile, docs, and parse
 
-**8a. Identify the model scope**
+**8a.** Discover the active dev schema: `dbt debug | grep schema`
 
-For each modified `.sql` model, derive the build scope using one-level selectors:
-- The model itself plus one level upstream and one level downstream: `1+<model_name>+1`
+**8b.** Build scope for each modified model: `1+<model_name>+1` (one level up and down only).
 
-**8b. Run dbt build**
-
+**8c.** Run:
 ```
 dbt build --select 1+<model_name>+1 --target dev
 ```
+All tests must pass. If a test fails: read the error, fix the root cause in SQL or yml, re-run. Do not proceed with failing tests.
 
-Run this for each modified model. If multiple modified models share a DAG lineage, combine them into one selector.
-
-All tests must pass. If a test fails:
-- Read the error carefully
-- Fix the root cause in the SQL or yml
-- Re-run until the build is clean
-- Do not proceed with failing tests
-
-**8c. Run compile, docs, and parse**
-
+**8d.** Run all four checks:
 ```
 dbt compile
 dbt docs generate
 dbt compile 2>&1 | grep -i "warning\|warn\|\[W\]"
 dbt parse --show-all-deprecations --no-partial-parse
 ```
+- `dbt compile` → zero errors
+- `dbt docs generate` → no errors
+- Warning grep → no dbt-owned warnings (urllib3 `RequestsDependencyWarning` is harmless — ignore it)
+- `dbt parse` → no deprecations on modified files
 
-- `dbt compile` must succeed with zero errors
-- `dbt docs generate` must complete without errors
-- The warning grep must return no dbt-owned warnings (the urllib3 `RequestsDependencyWarning` from the Snowflake connector is harmless — ignore it)
-- `dbt parse` must show no deprecations on modified files
+Fix any failure and re-run until all four are clean.
 
-If any check fails, fix the underlying issue and re-run. Do not recommend merging until all four are clean.
+> **GATE:** `dbt build` must pass with zero test failures. All four checks must be clean.
+> If any check fails, output `BLOCKED: <command> failed — fix before continuing.` and stop.
+
+**✓ CHECKPOINT 8:** Output exactly → `STEP 8 COMPLETE: dbt build passed, compile/docs/parse all clean.`
 
 ---
 
 ## Step 9 — Compare dev vs prod
 
-For each modified model, run a side-by-side comparison between the dev build and the prod table.
+For each modified model where a prod table exists:
 
-**9a. Identify the dev and prod table names**
-
-First, discover the active dev schema:
-```
-dbt debug | grep schema
-```
-
-Then:
+**9a.** Dev schema from Step 8a. Tables:
 - Dev: `analytics.<dev_schema>.<model_name>`
 - Prod: `analytics.model.<model_name>`
 
-**9b. Row count and uniqueness**
-
-Run via `snow sql -q "..." -c merit`:
+**9b.** Row count and PK uniqueness — run via `snow sql -q "..." -c merit`:
 ```sql
-select
-    'dev'  as env, count(*) as row_count, count(distinct <pk_column>) as unique_pk
+select 'dev' as env, count(*) as row_count, count(distinct <pk_column>) as unique_pk
 from analytics.<dev_schema>.<model_name>
 union all
-select
-    'prod' as env, count(*) as row_count, count(distinct <pk_column>) as unique_pk
+select 'prod' as env, count(*) as row_count, count(distinct <pk_column>) as unique_pk
 from analytics.model.<model_name>
 ```
 
-Flag if row counts or unique PKs differ significantly.
+**9c.** Date range: `min` and `max` of the primary date column in dev vs prod must align.
 
-**9c. Filter application**
+**9d.** Null rate: check null % on critical columns in dev vs prod. Flag if changed.
 
-Count how many rows were excluded by each filter (noise events, date cutoffs) — confirms filters are firing as expected.
-
-**9d. Date range consistency**
-
-`min` and `max` dates across dev and prod must align.
-
-**9e. Null rate**
-
-Null rate on critical columns should remain the same. If it changed, validate the reason.
-
-**9f. Metric comparison by month**
-
-Identify all metric columns in the model (revenue, sales_usd, quantity, cogs, spend, sessions, users, or any `_usd`, `_amount`, `_count`, `_units` suffix columns).
-
-For each metric, run:
+**9e.** Metric comparison by month — for every metric column (`_usd`, `_amount`, `_count`, `_units`, revenue, quantity, cogs, spend, sessions, users):
 ```sql
-select
-    date_trunc('month', <date_column>) as month,
-    'dev'                              as env,
-    sum(<metric_col>)                  as total
-from analytics.<dev_schema>.<model_name>
-group by ALL
-
+select date_trunc('month', <date_col>) as month, 'dev' as env, sum(<metric>) as total
+from analytics.<dev_schema>.<model_name> group by ALL
 union all
-
-select
-    date_trunc('month', <date_column>) as month,
-    'prod'                             as env,
-    sum(<metric_col>)                  as total
-from analytics.model.<model_name>
-group by ALL
-
+select date_trunc('month', <date_col>) as month, 'prod' as env, sum(<metric>) as total
+from analytics.model.<model_name> group by ALL
 order by month, env
 ```
 
-**9g. Present the comparison table**
-
-Format results as:
+**9f.** Present results as a table:
 
 | Month | Metric | Dev | Prod | Delta | Delta % | Expected? |
 |---|---|---|---|---|---|---|
-| 2026-05 | sales_usd | $X | $Y | $Z | Z% | Yes / No / Investigate |
+| 2026-05 | net_revenue | $X | $Y | $Z | Z% | Yes / No / Investigate |
 
-- Include a **Total** row at the bottom
-- For each row where Delta % > 1%, state whether the difference is expected based on the changes made
-- Flag any unexpected delta as a **data trust risk**
+Include a **Total** row. For every Delta % > 1%: state whether the difference is expected given the changes. Flag any unexpected delta as a **data trust risk**.
 
-If the model has no date column for monthly grouping, do a flat total comparison only.
+**9g.** Delta investigation — only if row counts or metrics diverge unexpectedly:
+1. Anti-join on PK: find rows in one table not in the other
+2. Age distribution of missing rows: systemic incremental blind spot check
+3. Category breakdown: group by `sub_channel`, `region`, `country`, `product` to find the source of divergence
 
-**9h. Delta investigation** _(run only if row counts or metrics diverge unexpectedly)_
+> **GATE:** Any unexpected metric delta > 5% must be explained before proceeding.
+> If unexplained, output `BLOCKED: <metric> has an unexplained <N>% delta between dev and prod — investigate before continuing.`
 
-Investigate the root cause of the delta between dev and prod:
-
-1. **Anti-join on primary key**: find rows in one table that do not exist in the other. This isolates missing rows from internal duplicates.
-2. **Age distribution of missing rows**: if missing rows span historical dates, it is a systemic incremental blind spot.
-3. **Key overlap**: which PK or join key columns differ between the tables.
-4. **Category breakdown**: group by key dimension columns (sub_channel, region, country, product) to find where the difference originates.
+**✓ CHECKPOINT 9:** Output exactly → `STEP 9 COMPLETE: dev/prod comparison done — <verdict per model>.`
 
 ---
 
 ## Step 10 — Challenge the solution
 
-After completing all prior steps, step back and evaluate the overall approach.
+Step back and evaluate the overall approach for each modified model:
 
-For each modified model, ask:
-- **Is this the right layer?** Would moving it simplify downstream models?
-- **Is the grain correct?** Would a different grain serve downstream consumers better without adding complexity?
-- **Is the join strategy sound?** Are there simpler join paths using already-existing upstream models?
-- **Is there a simpler SQL pattern?** Long CASE chains, nested CTEs, or repeated subexpressions are often a sign that an intermediate model or macro is missing.
-- **Does this create downstream brittleness?** Would a schema change in an upstream source break this model silently?
-- **Is an incremental model justified?** If the table is small (<1M rows), a full refresh is simpler and less error-prone.
+- **Right layer?** Should this logic live in `base/`, `facts/`, `derived/`, or `output/`? Would moving it simplify downstream?
+- **Correct grain?** Would a different grain serve consumers better without adding complexity?
+- **Sound join strategy?** Are there simpler join paths using already-existing upstream models?
+- **Simpler SQL?** Long CASE chains, nested CTEs, repeated subexpressions → often a missing intermediate model or macro.
+- **Downstream brittleness?** Would an upstream schema change break this model silently?
+- **Incremental justified?** If < 1M rows, a full refresh is simpler and less error-prone.
 
-If you identify a materially better approach:
+If a materially better approach exists:
 - Describe it in 3–5 sentences
-- Show a sketch of the alternative SQL or model structure
-- State clearly what would need to change and what the tradeoff is
-- Do not implement it without explicit user approval — propose only
+- Show a SQL sketch of the alternative
+- State the tradeoff clearly
+- **Do not implement without explicit user approval — propose only**
+
+**✓ CHECKPOINT 10:** Output exactly → `STEP 10 COMPLETE: solution challenged — <no issues / N alternative(s) proposed>.`
 
 ---
 
 ## Final summary
 
-Output the following at the end:
-
 **Changeset**
-- List of all files changed, with type and one-line description
+- List of all files changed, type, one-line description
 
 **Steps completed**
-- Checkbox list: which steps passed clean, which had issues that were fixed, which had issues still open
+- `[x]` STEP N COMPLETE / `[ ]` STEP N BLOCKED — reason
 
-**Open issues** _(anything not yet resolved)_
-- Numbered list. File, line, description, severity: Blocking / Major / Minor
+**Open issues** _(unresolved after all steps)_
+- Numbered list: file, line, description, severity: `Blocking / Major / Minor`
 
 **Dev vs prod delta**
-- One-line verdict per model: matches / minor difference (expected) / significant difference (investigate)
+- One line per model: `matches` / `minor difference (expected)` / `significant difference — investigate`
 
-**Alternative approach** _(if one was identified in Step 9)_
-- Summary in 2–3 sentences
+**Alternative approach** _(if proposed in Step 10)_
+- 2–3 sentence summary
 
 **Overall verdict**
-One of:
-- `Ready to merge` — all steps clean, dev/prod delta expected
-- `Ready with minor fixes` — non-blocking issues remain, list them
-- `Needs revision before merge` — blocking issues remain, list them explicitly
+- `Ready to merge` — all checkpoints passed, dev/prod delta expected
+- `Ready with minor fixes` — non-blocking issues remain, listed above
+- `Needs revision before merge` — one or more steps blocked, listed above
