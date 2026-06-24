@@ -1,6 +1,8 @@
 {
   "permissions": {
     "allow": [
+      "Edit(*)",
+      "Write(*)",
       "Bash(dbt show *)",
       "Bash(dbt test *)",
       "Bash(dbt run *)",
@@ -13,8 +15,6 @@
       "Bash(dbt docs *)",
       "Bash(dbt debug *)",
       "Bash(git fetch *)",
-      "Bash(git merge *)",
-      "Bash(git push *)",
       "Bash(git checkout *)",
       "Bash(git mv *)",
       "Bash(git add *)",
